@@ -1,8 +1,12 @@
 #include <Arduino.h>
 #include <SD.h>
 #include <SPI.h>
+#include <Adafruit_GFX.h>    // Core graphics library
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h>  // Assuming you are using a B/W e-paper display
+#include <Fonts/FreeMonoBold12pt7b.h>
+#include <Fonts/FreeSerif9pt7b.h>
+
 
 #define SD_CS 5  // Chip select pin for SD card
 #define BUTTON_NEXT_PIN 12  // Button pin for next page
@@ -12,7 +16,7 @@ String CurrentBook = "Beyond-Order"; // Can be changed to other books dynamicall
 String CurrentBookjson = "Beyond-Order.json"; // Can be changed to other books dynamically
 
 // Define your e-paper display
-GxEPD2_BW<GxEPD2_213_B72, GxEPD2::Orientation::Portrait> display(GxEPD2_213_B72(15, 2, 4, 16));  // Example for 2.13" display
+GxEPD2_BW<GxEPD2_290, GxEPD2_290::HEIGHT> display(GxEPD2_290(/*CS=*/ SD_CS, /*DC=*/ 17, /*RST=*/ 16, /*BUSY=*/ 4));
 
 // Global variables
 int currentPage = 0;  // Track the current real page
@@ -25,9 +29,10 @@ int linesPerPage = 10;  // Adjust based on the display size and text line height
 int charsPerLine = 30;  // Number of characters per line for content wrapping
 
 void setup() {
-    Serial.begin(9600);
+    Serial.begin(115200);
     pinMode(BUTTON_NEXT_PIN, INPUT_PULLUP);
     pinMode(BUTTON_PREV_PIN, INPUT_PULLUP);
+
 
     // Initialize SD card
     if (!SD.begin(SD_CS)) {
@@ -38,7 +43,7 @@ void setup() {
 
     // Load the Book data from the JSON file
     if (loadBookData()) {
-        display.begin();
+        display.init();
         display.setRotation(1);  // Adjust the display orientation if needed
         loadProgress();  // Load last read page
         showPage(currentPage);  // Display the first page
@@ -61,6 +66,8 @@ void loop() {
 // Load Book data from the SD card (JSON file)
 bool loadBookData() {
     sdFile = SD.open(CurrentBookjson);
+
+
     if (!sdFile) {
         Serial.println("Failed to open Book data file.");
         return false;

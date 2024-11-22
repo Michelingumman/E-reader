@@ -4,8 +4,6 @@
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h> 
-#include <Fonts/FreeMonoBold12pt7b.h>
-#include <Fonts/FreeSerif9pt7b.h>
 #include <vector>
 
 
@@ -13,9 +11,9 @@
 #define NEXT_BUTTON 12      // Button pin for next page
 #define PREV_BUTTON 13      // Button pin for previous page
 #define BATTERY_PIN 15      // analog pin for reaing the battery voltage
-#define PRESSED LOW         // Input is active low, so "pressed" is intuitive
+#define FULL_BATTERY_V 4.7  // specific battery full voltage 
 #define SECONDS_10 10000    // 10 seconds delay before deep sleep
-
+#define PRESSED LOW         // Input is active low, so "pressed" is intuitive
 
 String CurrentBook = "Beyond-Order"; // Can be changed to other books dynamically
 String CurrentBookjson = "Beyond-Order.json"; // Can be changed to other books dynamically
@@ -52,7 +50,7 @@ void nextPage(void);
 void prevPage(void);
 void saveProgess(void);
 void loadProgress(void);
-int batteryLevel(void);
+int showbatteryLevel(void);
 //  ---------- END of Function declartations -----------
 
 
@@ -98,7 +96,7 @@ void loop() {
     // Check if it's time to sleep
     if (millis() - lastInteractionTime >= SECONDS_10) {
         Serial.println("Entering deep sleep mode...");
-        esp_sleep_enable_ext1_wakeup((1ULL << NEXT_BUTTON) | (1ULL << PREV_BUTTON), ESP_EXT1_WAKEUP_ANY_LOW); // LOw since active LOW
+        esp_sleep_enable_ext1_wakeup((1ULL << NEXT_BUTTON) | (1ULL << PREV_BUTTON), ESP_EXT1_WAKEUP_ANY_LOW); // Low since active LOW
         esp_light_sleep_start();
     }
 }
@@ -106,9 +104,8 @@ void loop() {
 
 // Load Book data from the SD card (JSON file)
 bool loadBookData() {
+    // Open the JSON file
     sdFile = SD.open(CurrentBookjson);
-
-
     if (!sdFile) {
         Serial.println("Failed to open Book data file.");
         return false;
@@ -116,15 +113,33 @@ bool loadBookData() {
 
     // Read the JSON file into the document
     DeserializationError error = deserializeJson(jsonDoc, sdFile);
+    sdFile.close();
     if (error) {
         Serial.print("Failed to parse JSON: ");
         Serial.println(error.c_str());
         return false;
     }
 
+    // Validate that CurrentBook exists
+    if (!jsonDoc.containsKey(CurrentBook)) {
+        Serial.println("Book key not found in JSON.");
+        return false;
+    }
+
     // Calculate the total number of pages
-    totalPages = jsonDoc[CurrentBook].size();  // Get the number of pages
-    sdFile.close();
+    JsonArray pages = jsonDoc[CurrentBook];
+
+    int maxPageNumber = 0; //variable to iterate and find the max number
+
+    for(JsonObject page : pages){
+        int pageNumber = page["page_number"];
+        if(pageNumber > maxPageNumber){
+            maxPageNumber = pageNumber;
+        }
+    }
+
+    // Set the total pages
+    totalPages = maxPageNumber;
     return true;
 }
 
@@ -235,10 +250,22 @@ void loadProgress() {
     }
 }
 
-int batteryLevel(){
+void showbatteryLevel(){
     // Voltage divider: +B ---[ 100k ]--- Pin ---[ 100k ]--- GND
     //   Pin = +B/2
-    int level = 2 * analogRead(BATTERY_PIN) / 4096; // 0 - 3.3 will represent half the battery voltage bcause of the voltage divider
-    float percentage = level / 3.3;
-    return int(percentage);
+    float voltage = (2.0 * analogRead(BATTERY_PIN) * 3.3) / 4096.0;
+    int percentage = int((voltage / FULL_BATTERY_VOLTAGE) * 100);  // Define FULL_BATTERY_VOLTAGE, e.g., 4.2V
+
+    display.drawRoundRect(448, 3, 29, 10, 4, 1); // Battery outline
+    display.setTextWrap(false);
+    display.setCursor(422, 5);
+    display.print(batteryPercentage); // Display percentage
+    display.print("%");
+
+    //update battery fill rectangle based on percentage
+    if(percentage >= 5){
+        int batteryWidth = map(percentage, 0, 100, 6, 27);  // Map percentage to fill width
+        display.fillRoundRect(449, 4, batteryWidth, 8, 2, 1); // Fill the rectangle based on battery percentage
+    }
 }
+

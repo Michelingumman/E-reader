@@ -2,7 +2,7 @@ import fitz  # PyMuPDF
 import json
 import os
 
-input_pdf = "Conversion/books/Beyond-Order.pdf"
+input_pdf = "Conversion/Books/2Convert/Beyond-Order.pdf"
 pdf_base_name = os.path.splitext(os.path.basename(input_pdf))[0]
 
 # Function to extract and store PDF data with chapter detection

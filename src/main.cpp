@@ -10,17 +10,19 @@
 #define SD_CS 5             // Chip select pin for SD card
 #define NEXT_BUTTON 12      // Button pin for next page
 #define PREV_BUTTON 13      // Button pin for previous page
+#define MENU_BUTTON 14      // button pin for menu
 #define BATTERY_PIN 15      // analog pin for reaing the battery voltage
 #define FULL_BATTERY_V 4.7  // specific battery full voltage 
 #define SECONDS_10 10000    // 10 seconds delay before deep sleep
 #define PRESSED LOW         // Input is active low, so "pressed" is intuitive
+#define SCREEN_WIDTH 480    // default screen width in portrait
+#define SCREEN_HEIGHT 648   // default screen height in portrait
 
-String CurrentBook = "Beyond-Order"; // Can be changed to other books dynamically
-String CurrentBookjson = "Beyond-Order.json"; // Can be changed to other books dynamically
+
+
 
 // Define your e-paper display
 GxEPD2_BW<GxEPD2_290, GxEPD2_290::HEIGHT> display(GxEPD2_290(/*CS=*/ SD_CS, /*DC=*/ 17, /*RST=*/ 16, /*BUSY=*/ 4));
-
 
 
 // Global variables
@@ -28,29 +30,52 @@ File sdFile;
 DynamicJsonDocument jsonDoc;    // Adjust size based on your JSON file size
 std::vector<String> pageBuffer; // Buffer to store 10 pages at a time
 
+int screenHeight = SCREEN_HEIGHT; //default 
+int screenWidth = SCREEN_WIDTH; // default
+bool isLandscape = false;       //track orientation
+
 int bufferStart = 0;            // Starting page number of the current buffer
 int bufferEnd = 9;              // Ending page number of the current buffer (inclusive)
 
 int currentPage = 0;            // Track the current real page
 int totalPages = 0;             // Total number of real pages in the book (from JSON)
 
+int textSize = 2;               // Default text size
 int linesPerPage = 10;          // Adjust based on the display size and text line height
 int charsPerLine = 30;          // Number of characters per line for content wrapping
 
 unsigned long lastInteractionTime = 0;
 
+// books
+String CurrentBook = "Beyond-Order"; // Can be changed to other books dynamically
+String CurrentBookjson = "Beyond-Order.json"; // Can be changed to other books dynamically
 
+bool isMenuActive = false;
+int selectedMenuOption = 0;
+// Menu options
+String menuOptions[] = {"Select Book", "Text Size: ", "Exit Menu"};
+int numMenuOptions = sizeof(menuOptions) / sizeof(menuOptions[0]);
 
 // ------------ Function declarations ------------
-bool loadBookData(void);
+void screenLayout();
+void toggleLayout();
+
+void displayMenu();
+void executeMenuOption();
+void navigateMenu();
+
+bool loadBookData();
 void loadBuffer(int startPage);
+void loadProgress();
+
 void showPage(int pageNum);
+void nextPage();
+void prevPage();
+
 int calculateLines(String content);
-void nextPage(void);
-void prevPage(void);
-void saveProgess(void);
-void loadProgress(void);
-int showbatteryLevel(void);
+void saveProgess();
+
+int showbatteryLevel();
 //  ---------- END of Function declartations -----------
 
 
@@ -58,6 +83,8 @@ void setup() {
     Serial.begin(115200);
     pinMode(NEXT_BUTTON, INPUT_PULLUP);
     pinMode(PREV_BUTTON, INPUT_PULLUP);
+    pinMode(MENU_BUTTON, INPUT_PULLUP);
+    pinMode(BATTERY_PIN, INPUT);
 
 
     // Initialize SD card
@@ -66,8 +93,10 @@ void setup() {
         return;
     }
     Serial.println("SD card initialized.");
+    
     display.init();
-    display.setRotation(1);
+    screenLayout(); //default is portrait
+
 
     // Load the Book data from the JSON file
     if (loadBookData()) {
@@ -82,7 +111,13 @@ void setup() {
 
 
 void loop() {
+
     // Check for button presses
+    if (digitalRead(MENU_BUTTON) == PRESSED) { // debounce is taken care of via hardware cap
+        isMenuActive = !isMenuActive; //toggle menu active
+        if(isMenuActive) displayMenu();
+    }
+
     if (digitalRead(NEXT_BUTTON) == PRESSED) { // debounce is taken care of via hardware cap
         nextPage();
         lastInteractionTime = millis();  // Reset sleep timer
@@ -96,9 +131,140 @@ void loop() {
     // Check if it's time to sleep
     if (millis() - lastInteractionTime >= SECONDS_10) {
         Serial.println("Entering deep sleep mode...");
-        esp_sleep_enable_ext1_wakeup((1ULL << NEXT_BUTTON) | (1ULL << PREV_BUTTON), ESP_EXT1_WAKEUP_ANY_LOW); // Low since active LOW
+        esp_sleep_enable_ext1_wakeup((1ULL << NEXT_BUTTON) | (1ULL << PREV_BUTTON) | (1ULL << MENU_BUTTON), ESP_EXT1_WAKEUP_ANY_LOW); // Low since active LOW
         esp_light_sleep_start();
     }
+}
+
+
+//orientation as either portrait or landscape
+void screenLayout(){ 
+    if (isLandscape) {
+        screenWidth = SCREEN_HEIGHT;
+        screenHeight = SCREEN_WIDTH;
+        display.setRotation(1);  // Landscape rotation
+    } else {
+        screenWidth = SCREEN_WIDTH;
+        screenHeight = SCREEN_HEIGHT;
+        display.setRotation(0);  // Portrait rotation
+    }
+}
+
+
+void toggleLayout(){
+    isLandscape = !isLandscape; //toggle orientation
+    screenLayout();             //update the screen
+}
+
+
+// show menu graphics
+displayMenu(){
+    display.setTextColor(GxEPD_BLACK);
+    
+    //menu outline
+    display.fillRoundRec(109, 178, 263, 209, 7, 1);   //set blank background in the size of the menu first 
+    display.drawRoundRect(109, 178, 263, 209, 7, 1); 
+
+    //items
+    display.drawRoundRect(118, 212, 244, 44, 5, 1); 
+    display.drawRoundRect(118, 271, 244, 44, 5, 1);
+    display.drawRoundRect(118, 331, 244, 44, 5, 1);
+
+    //select seperator line 
+    display.drawLine(155, 271, 155, 314, 1); 
+    display.drawLine(155, 212, 155, 255, 1);
+    display.drawLine(155, 331, 155, 374, 1);
+
+    display.setTextSize(2);
+    display.setCursor(119, 187);
+    display.print("MENU");
+
+    for (int i = 0; i < numMenuOptions; i++){
+        display.setCursor(173, 227 + (i*60));
+        display.print(MenuOptions[i]);
+    }
+}
+
+// Handles navigating through the menu
+navigateMenu(){
+    // circulart navigation
+    if (digitalRead(NEXT_BUTTON) == PRESSED) {
+        selectedMenuOption = (selectedMenuOption + 1) % numMenuOptions;
+    }
+    if (digitalRead(PREV_BUTTON) == PRESSED) {
+        selectedMenuOption = (selectedMenuOption - 1 + numMenuOptions) % numMenuOptions;
+    }
+    if (digitalRead(MENU_BUTTON) == PRESSED) {
+        executeMenuOption();
+    }
+    
+    display.setTextSize(2);
+    switch (selectedMenuOption)
+    {
+        //select first rest is blank
+    case 0:
+        display.setCursor(133, 227);
+        display.print(">");
+        display.setCursor(133, 287);
+        display.print(" ");
+        display.setCursor(133, 347);
+        display.print(" ");
+        break;
+
+        //select second rest is blank
+    case 1:
+        display.setCursor(133, 287);
+        display.print(">");
+        display.setCursor(133, 227);
+        display.print(" ");
+        display.setCursor(133, 347);
+        display.print(" ");
+        break;
+    
+        //select third rest is blank
+    case 2:
+        display.setCursor(133, 346);
+        display.print(">");
+        display.setCursor(133, 227);
+        display.print(" ");
+        display.setCursor(133, 287);
+        display.print(" ");
+        break;
+    
+        //default is select first rest is blank
+    default:
+        display.setCursor(133, 227);
+        display.print(">");
+        display.setCursor(133, 287);
+        display.print(" ");
+        display.setCursor(133, 347);
+        display.print(" ");
+        break;
+    }
+}
+
+
+// Executes the selected menu option
+void executeMenuOption(){
+    switch(selectedMenuOption){
+        // select book
+        case 0:
+            selectBookMenu();
+            break;
+        
+        // select text size
+        case 1:
+            textSize = (textSize % 3) + 1;  // Cycle through text sizes 1, 2, 3
+            display.setCursor(295, 287);
+            display.print(textSize);
+            break;
+        
+        // exit menu
+        case 2:
+            isMenuActive = false;
+            break;
+    }
+
 }
 
 
@@ -167,11 +333,29 @@ void loadBuffer(int startPage) {
 
 // Display the current page content and page number
 void showPage(int pageNum) {
-    // Ensure pageNum is within valid range
-    if (pageNum < 0 || pageNum >= totalPages) return;
+    // Ensure pageNum is within the valid range
+    if (pageNum < 0 || pageNum >= totalPages) {
+        Serial.println("Invalid page number.");
+        return;
+    }
 
+    // Fetch page content from the loaded book
     String pageContent = jsonDoc[CurrentBook][pageNum]["content"].as<String>();
-    int numLines = calculateLines(pageContent);
+    if (pageContent.length() == 0) {
+        Serial.println("No content found for the page.");
+        Serial.println("Writing blank on page");
+
+                // Clear the screen
+        display.fillScreen(GxEPD_WHITE);
+
+        // Display the content
+        display.setTextColor(GxEPD_BLACK);
+        display.setTextSize(2);  // Adjust text size as needed
+        display.setCursor(10, 10);
+
+
+        return;
+    }
 
     // Clear the screen
     display.fillScreen(GxEPD_WHITE);
@@ -256,6 +440,7 @@ void showbatteryLevel(){
     float voltage = (2.0 * analogRead(BATTERY_PIN) * 3.3) / 4096.0;
     int percentage = int((voltage / FULL_BATTERY_VOLTAGE) * 100);  // Define FULL_BATTERY_VOLTAGE, e.g., 4.2V
 
+    display.setTextColor(GxEPD_BLACK);
     display.drawRoundRect(448, 3, 29, 10, 4, 1); // Battery outline
     display.setTextWrap(false);
     display.setCursor(422, 5);

@@ -1,33 +1,67 @@
 #include <Arduino.h>
-#include <SD.h>
-#include <SPI.h>
+#include <Wire.h>
+#include "SdFat.h"
+#include "SPI.h"
+#include <string.h>
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <ArduinoJson.h>
 #include <GxEPD2_BW.h> 
+#include <GxEPD2_3C.h>
 #include <vector>
 
 
 #define SD_CS 5             // Chip select pin for SD card
+
+
+//from GxEPD2_BW.h
+
+// mapping of Waveshare ESP32 Driver Board
+// BUSY -> 25, RST -> 26, DC -> 27, CS-> 15, CLK -> 13, DIN -> 14
+// NOTE: this board uses "unusual" SPI pins and requires re-mapping of HW SPI to these pins in SPIClass
+//       see example GxEPD2_WS_ESP32_Driver.ino, it shows how this can be done easily
+
+
+
+
+
+#define CS 15
+#define DC 27
+#define RST 26
+#define BUSY 25
+#define CLK 13
+
 #define NEXT_BUTTON 12      // Button pin for next page
 #define PREV_BUTTON 13      // Button pin for previous page
 #define MENU_BUTTON 14      // button pin for menu
+
 #define BATTERY_PIN 15      // analog pin for reaing the battery voltage
-#define FULL_BATTERY_V 4.7  // specific battery full voltage 
+#define FULL_BATTERY_VOLTAGE 4.7  // specific battery full voltage 
+
 #define SECONDS_10 10000    // 10 seconds delay before deep sleep
+
 #define PRESSED LOW         // Input is active low, so "pressed" is intuitive
+
 #define SCREEN_WIDTH 480    // default screen width in portrait
 #define SCREEN_HEIGHT 648   // default screen height in portrait
 
 
+#define USE_HSPI_FOR_EPD
+
+#if defined(ESP32) && defined(USE_HSPI_FOR_EPD)
+SPIClass hspi(HSPI);
+#endif
 
 
 // Define your e-paper display
-GxEPD2_BW<GxEPD2_290, GxEPD2_290::HEIGHT> display(GxEPD2_290(/*CS=*/ SD_CS, /*DC=*/ 17, /*RST=*/ 16, /*BUSY=*/ 4));
+#define GxEPD2_DRIVER_CLASS GxEPD2_583c_GDEQ0583Z31 // GDEW0583Z83 648x480, EK79655 (GD7965), (WFT0583CZ61)
+GxEPD2_3C<GxEPD2_583c_GDEQ0583Z31, GxEPD2_583c_GDEQ0583Z31::HEIGHT / 2> display(GxEPD2_583c_GDEQ0583Z31(CS, DC, RST, BUSY)); // GDEQ0583Z31 648x480, UC8179C
+// GxEPD2_BW<GxEPD2_290, GxEPD2_290::HEIGHT> display(GxEPD2_290(CS, DC, RST, BUSY));
 
 
 // Global variables
-File sdFile;
-DynamicJsonDocument jsonDoc;    // Adjust size based on your JSON file size
+SdFat sd;
+SdFile openedBook;
+DynamicJsonDocument jsonDoc(4098);    // Adjust size based on your JSON file size
 std::vector<String> pageBuffer; // Buffer to store 10 pages at a time
 
 int screenHeight = SCREEN_HEIGHT; //default 
@@ -63,7 +97,7 @@ void toggleLayout();
 void displayMenu();
 void executeMenuOption();
 void navigateMenu();
-
+void selectBookMenu();
 bool loadBookData();
 void loadBuffer(int startPage);
 void loadProgress();
@@ -75,12 +109,15 @@ void prevPage();
 int calculateLines(String content);
 void saveProgess();
 
-int showbatteryLevel();
+void showbatteryLevel();
 //  ---------- END of Function declartations -----------
 
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(9600);
+    while (!Serial){};
+    delay(500);
+
     pinMode(NEXT_BUTTON, INPUT_PULLUP);
     pinMode(PREV_BUTTON, INPUT_PULLUP);
     pinMode(MENU_BUTTON, INPUT_PULLUP);
@@ -88,13 +125,14 @@ void setup() {
 
 
     // Initialize SD card
-    if (!SD.begin(SD_CS)) {
-        Serial.println("SD card initialization failed!");
-        return;
-    }
+    if (!sd.begin(SD_CS, SPI_FULL_SPEED)) sd.initErrorHalt();
+    
     Serial.println("SD card initialized.");
     
-    display.init();
+    hspi.begin(13, 12, 14, 15); // remap hspi for EPD (swap pins)
+    display.epd2.selectSPI(hspi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
+
+    display.init(9600);
     screenLayout(); //default is portrait
 
 
@@ -106,7 +144,7 @@ void setup() {
 
     // Record the time of the last interaction
     lastInteractionTime = millis();
-    setCpuFrequencyMhz(20);
+    // setCpuFrequencyMhz(20);
 }
 
 
@@ -131,7 +169,7 @@ void loop() {
     // Check if it's time to sleep
     if (millis() - lastInteractionTime >= SECONDS_10) {
         Serial.println("Entering deep sleep mode...");
-        esp_sleep_enable_ext1_wakeup((1ULL << NEXT_BUTTON) | (1ULL << PREV_BUTTON) | (1ULL << MENU_BUTTON), ESP_EXT1_WAKEUP_ANY_LOW); // Low since active LOW
+        esp_sleep_enable_ext1_wakeup((1ULL << NEXT_BUTTON) | (1ULL << PREV_BUTTON) | (1ULL << MENU_BUTTON), ESP_EXT1_WAKEUP_ALL_LOW); // Low since active LOW
         esp_light_sleep_start();
     }
 }
@@ -158,11 +196,11 @@ void toggleLayout(){
 
 
 // show menu graphics
-displayMenu(){
+void displayMenu(){
     display.setTextColor(GxEPD_BLACK);
     
     //menu outline
-    display.fillRoundRec(109, 178, 263, 209, 7, 1);   //set blank background in the size of the menu first 
+    display.fillRoundRect(109, 178, 263, 209, 7, 1);   //set blank background in the size of the menu first 
     display.drawRoundRect(109, 178, 263, 209, 7, 1); 
 
     //items
@@ -181,12 +219,12 @@ displayMenu(){
 
     for (int i = 0; i < numMenuOptions; i++){
         display.setCursor(173, 227 + (i*60));
-        display.print(MenuOptions[i]);
+        display.print(menuOptions[i]);
     }
 }
 
 // Handles navigating through the menu
-navigateMenu(){
+void navigateMenu(){
     // circulart navigation
     if (digitalRead(NEXT_BUTTON) == PRESSED) {
         selectedMenuOption = (selectedMenuOption + 1) % numMenuOptions;
@@ -267,19 +305,23 @@ void executeMenuOption(){
 
 }
 
+void selectBookMenu(){
+    return;
+}
 
 // Load Book data from the SD card (JSON file)
 bool loadBookData() {
     // Open the JSON file
-    sdFile = SD.open(CurrentBookjson);
-    if (!sdFile) {
+    
+    File32 myFile = sd.open(CurrentBookjson, FILE_READ);
+    if (!myFile) {
         Serial.println("Failed to open Book data file.");
         return false;
     }
 
     // Read the JSON file into the document
-    DeserializationError error = deserializeJson(jsonDoc, sdFile);
-    sdFile.close();
+    DeserializationError error = deserializeJson(jsonDoc, myFile);
+    myFile.close();
     if (error) {
         Serial.print("Failed to parse JSON: ");
         Serial.println(error.c_str());
@@ -390,6 +432,20 @@ int calculateLines(String content) {
     return (content.length() / charsPerLine) + 1;  // Number of lines based on content length
 }
 
+
+// Save the current page number to a file
+void saveProgress() {
+    FILE progressFile = sd.open("/progress.txt", FILE_WRITE);
+    if (progressFile) {
+        progressFile.print(currentPage);
+        progressFile.close();
+        Serial.print("Saved current page: ");
+        Serial.println(currentPage);
+    } else {
+        Serial.println("Failed to save progress.");
+    }
+}
+
 // Go to the next page
 void nextPage() {
     if (currentPage < totalPages - 1) {
@@ -408,22 +464,11 @@ void prevPage() {
     }
 }
 
-// Save the current page number to a file
-void saveProgress() {
-    File progressFile = SD.open("/progress.txt", FILE_WRITE);
-    if (progressFile) {
-        progressFile.print(currentPage);
-        progressFile.close();
-        Serial.print("Saved current page: ");
-        Serial.println(currentPage);
-    } else {
-        Serial.println("Failed to save progress.");
-    }
-}
+
 
 // Load the last read page from file
 void loadProgress() {
-    File progressFile = SD.open("/progress.txt");
+    FILE progressFile = sd.open("/progress.txt");
     if (progressFile) {
         currentPage = progressFile.parseInt();
         progressFile.close();
@@ -438,7 +483,7 @@ void showbatteryLevel(){
     // Voltage divider: +B ---[ 100k ]--- Pin ---[ 100k ]--- GND
     //   Pin = +B/2
     float voltage = (2.0 * analogRead(BATTERY_PIN) * 3.3) / 4096.0;
-    int percentage = int((voltage / FULL_BATTERY_VOLTAGE) * 100);  // Define FULL_BATTERY_VOLTAGE, e.g., 4.2V
+    int batteryPercentage = int((voltage / FULL_BATTERY_VOLTAGE) * 100);  // Define FULL_BATTERY_VOLTAGE, e.g., 4.2V
 
     display.setTextColor(GxEPD_BLACK);
     display.drawRoundRect(448, 3, 29, 10, 4, 1); // Battery outline
@@ -448,8 +493,8 @@ void showbatteryLevel(){
     display.print("%");
 
     //update battery fill rectangle based on percentage
-    if(percentage >= 5){
-        int batteryWidth = map(percentage, 0, 100, 6, 27);  // Map percentage to fill width
+    if(batteryPercentage >= 5){
+        int batteryWidth = map(batteryPercentage, 0, 100, 6, 27);  // Map percentage to fill width
         display.fillRoundRect(449, 4, batteryWidth, 8, 2, 1); // Fill the rectangle based on battery percentage
     }
 }

@@ -32,7 +32,8 @@
 #ifndef _IMAGEDATA_H_
 #define _IMAGEDATA_H_
 
-extern const unsigned char gImage_5in83[];
+extern const unsigned char gImage_5in83b_V2_b[];
+extern const unsigned char gImage_5in83b_V2_r[];
 
 #endif
 /* FILE END */
